@@ -15,6 +15,10 @@
 roles/**
 !roles/requirements.yml
 
+
+# environment
+.env
+
 # Avoid plain-text passwords
 *pwd*
 *pass*
