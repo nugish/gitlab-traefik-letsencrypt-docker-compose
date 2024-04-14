@@ -1,0 +1,145 @@
+# compose-spec
+
+x-logging: &default-logging
+  logging:
+    options:
+      max-size: "10m"
+      max-file: "10"
+
+services:
+
+  proxy:
+    container_name: proxy
+    image: traefik:2.11.2
+    restart: always
+    env_file: ./common.env
+    environment:
+      no_proxy: gitlab
+    command:
+      - --entrypoints.ssh.address=:22
+      - --entrypoints.web.address=:80
+      - --providers.docker
+      - --providers.docker.exposedByDefault=false
+      # [OPTION]prometheus監視エンドポイントを開く。不要であれば無効化してよい
+      - --entryPoints.metrics.address=:8082
+      - --metrics.prometheus=true
+      - --metrics.prometheus.entryPoint=metrics
+      # [OPTION]ダッシュボード。必ず本番環境では無効にすること
+      - --api.insecure=true
+    ports:
+      - "22:22"
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    <<: *default-logging
+
+  gitlab:
+    container_name: gitlab
+    image: gitlab/gitlab-ce:16.10.2-ce.0
+    restart: always
+    env_file: ./common.env
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-log:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+    depends_on:
+      - gitlab-db
+    hostname: 'gitlab.example.com'
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab.example.com/'
+        gitlab_rails['time_zone'] = 'Jakarta'
+        gitlab_rails['db_adapter'] = 'postgresql'
+        gitlab_rails['db_host'] = 'gitlab-db'
+        gitlab_rails['db_port'] = 5432
+        gitlab_rails['db_database'] = 'gitlab'
+        gitlab_rails['db_username'] = 'gitlab'
+        gitlab_rails['db_password'] = 'gitlab'
+        nginx['listen_port'] = 80
+        nginx['listen_https'] = false
+        nginx['proxy_set_headers'] = {
+          "X-Forwarded-Proto" => "https",
+          "X-Forwarded-Ssl" => "on"
+        }
+        
+        #[OPTION]gitlab container registryを有効化することで、コンテナをローカルに保有できる
+        registry_external_url 'http://registry.example.com'
+        gitlab_rails['registry_enabled'] = true
+        gitlab_rails['registry_api_url'] = "http://localhost:5000"
+        registry['enable'] = true
+        registry_nginx['enable'] = false
+        registry['registry_http_addr'] = "0.0.0.0:5000"
+        
+        #[OPTION]pages機能を有効化することで、ブラウザでhtmlレポートが読めるようになる
+        #pagesを使用する場合、生IPは使用不可。
+        pages_external_url 'http://gitlab.example.com/'
+        gitlab_pages['enable'] = true
+        gitlab_pages['access_control'] = true
+        gitlab_pages['redirect_http'] = false
+        #proxy=>pagesのアクセス経路
+        pages_nginx['enable'] = false
+        gitlab_pages['external_http'] = ['0.0.0.0:8081']
+        
+        #[OPTION]リソース軽減するために不要な機能を停止
+        gitlab_rails['gitlab_kas_enabled'] = false
+        grafana['enable'] = false
+        prometheus_monitoring['enable'] = false
+        prometheus['enable'] = false
+        alertmanager['enable'] = false
+      no_proxy: proxy
+    <<: *default-logging
+    labels:
+      - "traefik.enable=true"
+      # ssh(git)
+      - "traefik.tcp.services.gitlab-ssh.loadbalancer.server.port=22"
+      - "traefik.tcp.routers.gitlab-ssh.service=gitlab-ssh"
+      - "traefik.tcp.routers.gitlab-ssh.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.gitlab-ssh.entrypoints=ssh"
+      # http
+      - "traefik.http.services.gitlab.loadbalancer.server.port=80"
+      - "traefik.http.routers.gitlab.service=gitlab"
+      - "traefik.http.routers.gitlab.rule=Host(`gitlab.example.com`)"
+      - "traefik.http.routers.gitlab.entrypoints=web"
+      # http-registry
+      - "traefik.http.services.gitlab-registry.loadbalancer.server.port=5000"
+      - "traefik.http.routers.gitlab-registry.service=gitlab-registry"
+      - "traefik.http.routers.gitlab-registry.rule=Host(`registry.example.com`)"
+      - "traefik.http.routers.gitlab-registry.entrypoints=web"
+      # http-pages
+      - "traefik.http.services.gitlab-pages.loadbalancer.server.port=8081"
+      - "traefik.http.routers.gitlab-pages.service=gitlab-pages"
+      - "traefik.http.routers.gitlab-pages.rule=Host(`foogroupname.gitlab.example.com`) || Host(`projects.gitlab.example.com`)"
+      - "traefik.http.routers.gitlab-pages.entrypoints=web"
+
+  gitlab-db:
+    container_name: gitlab-db
+    image: postgres:14
+    restart: always
+    environment:
+      POSTGRES_DB: gitlab
+      POSTGRES_USER: gitlab
+      POSTGRES_PASSWORD: gitlab
+    volumes:
+      - gitlab-db:/var/lib/postgresql/data
+    <<: *default-logging
+
+  gitlab-runner:
+    container_name: gitlab-runner
+    image: gitlab/gitlab-runner:ubuntu-v16.10.0
+    restart: always
+    volumes:
+      - gitlab-runner-config:/etc/gitlab-runner
+      - /var/run/docker.sock:/var/run/docker.sock
+    <<: *default-logging
+    extra_hosts:
+      - "gitlab.example.com:10.0.***.****"
+      - "registry.example.com:10.0.***.****"
+
+volumes:
+  gitlab-config:
+  gitlab-log:
+  gitlab-data:
+  gitlab-db:
+  gitlab-runner-config:
+
